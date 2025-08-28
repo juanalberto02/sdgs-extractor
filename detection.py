@@ -20,33 +20,21 @@ from extractors_text import (
     extract_keywords_from_text,
 )
 
-# --- SBERT imports ---
-import os
+# --- TF-IDF imports & cache ---
 import numpy as np
-from sentence_transformers import SentenceTransformer
-_SBERT_MODEL = os.getenv("SBERT_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-_sbert = None
+from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.sparse import csr_matrix
 
-def _get_sbert():
-    global _sbert
-    if _sbert is None:
-        _sbert = SentenceTransformer(_SBERT_MODEL)
-    return _sbert
+_TFIDF_VECTORIZER = None
+_TFIDF_RULES_MATRIX = None
+_TFIDF_RULES_HASH = None  # untuk invalidasi cache jika rules berubah
 
-def _sbert_encode(texts):
-    model = _get_sbert()
-    # normalize_embeddings=True agar cosine bisa pakai dot
-    return model.encode(
-        texts,
-        batch_size=32,
-        show_progress_bar=False,
-        normalize_embeddings=True
-    )
-
-def _cosine_dot(u: np.ndarray, v: np.ndarray) -> float:
-    # vektor sudah dinormalisasi -> cosine = dot
-    return float(np.dot(u, v))
-
+def _rules_hash(rules_df):
+    # hash ringan untuk deteksi perubahan daftar 'inc'
+    inc_series = rules_df.get("inc")
+    if inc_series is None:
+        return 0
+    return hash(tuple(inc_series.astype(str).tolist()))
 
 # ===== Konfigurasi =====
 ADJACENT_PHRASES_DEFAULT = False  # default non-adjacent untuk token tanpa kutip
@@ -311,14 +299,27 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
 
     # 2) Siapkan teks gabungan untuk similarity
     combined = f"{title}. {abstract}. {keywords}"
-    # 2a) Precompute SBERT embeddings (hemat: sekali dokumen, batch semua inc)
-    #    - Dokumen (gabungan title/abstract/keywords) → 1 embedding
-    #    - Semua 'inc' pada rules_df → batch embedding
+    # --- TF-IDF precompute (hemat: fit sekali untuk semua inc) ---
+    global _TFIDF_VECTORIZER, _TFIDF_RULES_MATRIX, _TFIDF_RULES_HASH
+
     inc_list = [str(r.get("inc", "") or "") for _, r in rules_df.iterrows()]
-    # encode doc + all inc sekaligus agar 1 panggilan
-    sbert_vecs = _sbert_encode([combined] + inc_list)
-    doc_vec = sbert_vecs[0]
-    inc_vecs = sbert_vecs[1:]
+    cur_hash = _rules_hash(rules_df)
+
+    if (_TFIDF_VECTORIZER is None) or (_TFIDF_RULES_MATRIX is None) or (_TFIDF_RULES_HASH != cur_hash):
+        _TFIDF_VECTORIZER = TfidfVectorizer(
+            lowercase=True,
+            ngram_range=(1, 2),      # unigrams + bigrams → tangkap frasa ringan
+            token_pattern=r"(?u)\b\w+\b",  # aman untuk EN/ID
+            min_df=1,
+            max_features=None        # bisa dibatasi mis. 100k kalau rules sangat banyak
+        )
+        _TFIDF_RULES_MATRIX = _TFIDF_VECTORIZER.fit_transform(inc_list)   # shape: [n_rules, n_vocab]
+        _TFIDF_RULES_HASH = cur_hash
+
+    doc_vec = _TFIDF_VECTORIZER.transform([combined])  # shape: [1, n_vocab]
+    # cosine = (tfidf normalized) • (tfidf normalized); sklearn normalizes rows,
+    # jadi kita bisa pakai dot sparse dengan aman:
+    tfidf_sims = (doc_vec @ _TFIDF_RULES_MATRIX.T).toarray()[0]  # size: [n_rules]
 
     if rules_df is None or rules_df.empty:
         return {
@@ -347,15 +348,12 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
         scope_text = " ".join(scope_text_parts)
 
         found_all, miss_all, cov, present_cnt, total_cnt = _check_rule_against_text(inc, scope_text)
-
         excl_found, excl_terms = _exclusion_found(exc, jenis, title, abstract, keywords)
 
         req_badge = _required_badge(inc, jenis, title, abstract, keywords)
         unnec_badge = f"🧹 Remove: {', '.join(excl_terms)}" if excl_found else "✅ No unnecessary words found"
 
-        # --- Similarity: BOW (lama) + SBERT (baru) ---
-        sim_bow = _similarity_score(combined, inc)
-        sim_bert = _cosine_dot(doc_vec, inc_vecs[idx]) if inc_vecs[idx] is not None else 0.0
+        sim_tfidf = float(tfidf_sims[idx])  # <-- skor utama sekarang
 
         entry = {
             "sdg": sdg,
@@ -364,10 +362,9 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
             "exc": exc,
             "jenis": jenis,
 
-            # sim lama tetap disimpan jika UI lama masih pakai key 'similarity'
-            "similarity_bow": float(sim_bow),
-            "similarity_bert": float(sim_bert),
-            "similarity": float(sim_bert),   # backward-compat: jadikan SBERT default
+            # sim utama (bertahan nama lama 'similarity' agar kompatibel UI)
+            "similarity": sim_tfidf,
+            "similarity_tfidf": sim_tfidf,
 
             "required_words": ("All required words present" if cov == 1.0 else ("Missing: " + ", ".join(miss_all))) if total_cnt else "-",
             "unnecessary_words": (", ".join(excl_terms) if excl_found else "No unnecessary words found"),
@@ -394,24 +391,25 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
         }
         ranked_rows.append(entry)
 
-    # --- Ranking utama: utamakan match → coverage → similarity_bert
+    # Ranking: utamakan match → coverage → similarity TF-IDF
     all_rules = sorted(
         ranked_rows,
-        key=lambda x: (x["match_flag"], x["match_coverage"], x["similarity_bert"]),
+        key=lambda x: (x["match_flag"], x["match_coverage"], x["similarity"]),
         reverse=True
     )
 
-    # --- top_rules: per SDG, kalau ada match ambil yang match; jika tidak, ambil similarity_bert tertinggi
+    # Top-per-SDG: kalau ada match ambil match; kalau tidak, ambil similarity tertinggi
     top_rules = []
     by_sdg = {}
     for e in all_rules:
         by_sdg.setdefault(e["sdg"], []).append(e)
     for sdg, items in sorted(by_sdg.items(), key=lambda x: x[0]):
         items_match = [it for it in items if it["match_flag"]]
-        pick = (sorted(items_match, key=lambda x: (x["match_coverage"], x["similarity_bert"]), reverse=True)[0]
+        pick = (sorted(items_match, key=lambda x: (x["match_coverage"], x["similarity"]), reverse=True)[0]
                 if items_match else
-                sorted(items, key=lambda x: x["similarity_bert"], reverse=True)[0])
+                sorted(items, key=lambda x: x["similarity"], reverse=True)[0])
         top_rules.append(pick)
+
 
 
     return {

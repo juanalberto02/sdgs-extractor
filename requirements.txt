@@ -8,5 +8,5 @@ pymupdf
 pymysql
 mysql-connector-python
 python-dotenv
-torch
-sentence-transformers
+scikit-learn
+scipy
