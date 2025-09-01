@@ -403,13 +403,23 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
     by_sdg = {}
     for e in all_rules:
         by_sdg.setdefault(e["sdg"], []).append(e)
-    for sdg, items in sorted(by_sdg.items(), key=lambda x: x[0]):
-        items_match = [it for it in items if it["match_flag"]]
-        pick = (sorted(items_match, key=lambda x: (x["match_coverage"], x["similarity"]), reverse=True)[0]
-                if items_match else
-                sorted(items, key=lambda x: x["similarity"], reverse=True)[0])
-        top_rules.append(pick)
 
+    for sdg, items in sorted(by_sdg.items(), key=lambda x: x[0]):
+        pick = None
+
+        for it in items:
+            # Cek jika salah satu jenis field title/abstract/keywords memenuhi SEMUA required terms
+            if (len(it["present_terms_title"]) == it["match_total_terms"]) or \
+            (len(it["present_terms_abstract"]) == it["match_total_terms"]) or \
+            (len(it["present_terms_keywords"]) == it["match_total_terms"]):
+                pick = it
+                break  # Langsung ambil yang pertama yang memenuhi syarat ini
+
+        if not pick:
+            # Jika tidak ada yang memenuhi satu bidang penuh → ambil similarity tertinggi
+            pick = sorted(items, key=lambda x: x["similarity"], reverse=True)[0]
+
+        top_rules.append(pick)
 
 
     return {
