@@ -20,14 +20,56 @@ from extractors_text import (
     extract_keywords_from_text,
 )
 
-# --- TF-IDF imports & cache ---
+# --- Embedding imports & cache (BERT-style) ---
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from scipy.sparse import csr_matrix
 
-_TFIDF_VECTORIZER = None
-_TFIDF_RULES_MATRIX = None
-_TFIDF_RULES_HASH = None  # untuk invalidasi cache jika rules berubah
+try:
+    # sentence-transformers memberikan wrapper yang ringan & siap pakai
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None  # supaya file tetap bisa diimport walau belum terpasang
+
+_EMB_MODEL = None
+_EMB_RULES = None          # np.ndarray [n_rules, dim]
+_EMB_RULES_HASH = None     # untuk invalidasi cache
+_EMB_DIM = None
+
+# Pilih model kecil (ubah ke multilingual bila perlu)
+_EMB_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Alternatif multilingual:
+# _EMB_MODEL_NAME = "intfloat/multilingual-e5-small"
+# _EMB_MODEL_NAME = "sentence-transformers/multilingual-MiniLM-L12-v2"
+
+def _load_embedding_model():
+    global _EMB_MODEL, _EMB_DIM
+    if _EMB_MODEL is None:
+        if SentenceTransformer is None:
+            raise RuntimeError(
+                "sentence-transformers belum terpasang. Jalankan: pip install sentence-transformers"
+            )
+        _EMB_MODEL = SentenceTransformer(_EMB_MODEL_NAME)
+        # Cek dimensi dari satu kalimat dummy
+        test_vec = _EMB_MODEL.encode(["test"], normalize_embeddings=True)
+        _EMB_DIM = int(test_vec.shape[1])
+    return _EMB_MODEL
+
+def _embed_texts(texts: list[str], normalize: bool = True) -> np.ndarray:
+    """
+    Encode daftar teks -> vektor [n, dim].
+    normalize=True -> L2-normalize (cosine → dot product).
+    """
+    model = _load_embedding_model()
+    # encode batch; sentence-transformers punya param normalize_embeddings
+    vecs = model.encode(texts, normalize_embeddings=normalize, convert_to_numpy=True)
+    return vecs.astype(np.float32, copy=False)
+
+def _rules_hash_for_embed(rules_df):
+    inc_series = rules_df.get("inc")
+    if inc_series is None:
+        return 0
+    # hash ringan; kalau mau deterministik, bisa pakai hashlib.sha1 atas join-string
+    return hash(tuple(inc_series.astype(str).tolist()))
+
 
 def _rules_hash(rules_df):
     # hash ringan untuk deteksi perubahan daftar 'inc'
@@ -351,29 +393,27 @@ def detect_from_pdf_with_rules(pdf_path: str, rules_df: pd.DataFrame) -> dict:
     kw_text = extract_text_for_keywords(pdf_path, max_pages=3)
     keywords = extract_keywords_from_text(kw_text)
 
-    # 2) Siapkan teks gabungan untuk similarity
-    combined = f"{title}. {abstract}. {keywords}"
-    # --- TF-IDF precompute (hemat: fit sekali untuk semua inc) ---
-    global _TFIDF_VECTORIZER, _TFIDF_RULES_MATRIX, _TFIDF_RULES_HASH
+    # 2) Siapkan teks gabungan untuk similarity (embedding)
+    combined = f"[TITLE] {title}\n[ABSTRACT] {abstract}\n[KEYWORDS] {keywords}".strip()
+
+    # --- Precompute embeddings rules (cache by hash) ---
+    global _EMB_RULES, _EMB_RULES_HASH
 
     inc_list = [str(r.get("inc", "") or "") for _, r in rules_df.iterrows()]
-    cur_hash = _rules_hash(rules_df)
+    cur_hash = _rules_hash_for_embed(rules_df)
 
-    if (_TFIDF_VECTORIZER is None) or (_TFIDF_RULES_MATRIX is None) or (_TFIDF_RULES_HASH != cur_hash):
-        _TFIDF_VECTORIZER = TfidfVectorizer(
-            lowercase=True,
-            ngram_range=(1, 2),      # unigrams + bigrams → tangkap frasa ringan
-            token_pattern=r"(?u)\b\w+\b",  # aman untuk EN/ID
-            min_df=1,
-            max_features=None        # bisa dibatasi mis. 100k kalau rules sangat banyak
-        )
-        _TFIDF_RULES_MATRIX = _TFIDF_VECTORIZER.fit_transform(inc_list)   # shape: [n_rules, n_vocab]
-        _TFIDF_RULES_HASH = cur_hash
+    if (_EMB_RULES is None) or (_EMB_RULES_HASH != cur_hash):
+        # Encode semua 'inc' jadi vektor, normalize=True agar cosine = dot
+        _EMB_RULES = _embed_texts(inc_list, normalize=True)  # [n_rules, dim]
+        _EMB_RULES_HASH = cur_hash
 
-    doc_vec = _TFIDF_VECTORIZER.transform([combined])  # shape: [1, n_vocab]
-    # cosine = (tfidf normalized) • (tfidf normalized); sklearn normalizes rows,
-    # jadi kita bisa pakai dot sparse dengan aman:
-    tfidf_sims = (doc_vec @ _TFIDF_RULES_MATRIX.T).toarray()[0]  # size: [n_rules]
+    # Encode dokumen
+    doc_vec = _embed_texts([combined], normalize=True)[0]  # [dim]
+
+    # Cosine similarity = dot karena sudah L2-normalized
+    # hasil: array [n_rules]
+    tfidf_sims = (_EMB_RULES @ doc_vec.T).astype(float)
+
 
     if rules_df is None or rules_df.empty:
         return {
