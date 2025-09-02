@@ -85,13 +85,67 @@ def _phrase_present(hay: str, needle: str, adjacency: bool) -> bool:
 
 def _match_token(hay: str, token: str) -> bool:
     """
-    - Jika token di-quote → frasa adjacent
-    - Jika tidak → per-kata (non-adjacent), toleran spasi/simbol
+    Aturan baru:
+    - Token di-quote -> frasa wajib berdekatan & berurutan (adjacent phrase).
+    - Token dengan '*' -> wildcard di dalam SATU KATA (CO* -> CO2/CO3/COxyz).
+    - Selain itu -> exact whole-word match (CO2 harus CO2 sebagai kata utuh).
+    """
+    if not token or not hay:
+        return False
+    text = _pre_normalize_hay(hay)
+    rx = _token_to_regex(token)
+    return bool(rx.search(text))
+
+
+WORD_BOUNDARY = r"\b"
+
+def _pre_normalize_hay(hay: str) -> str:
+    """
+    Normalisasi ringan utk teks dokumen:
+    - Gabungkan kata terpenggal baris: 'pre-\n cision' -> 'precision'
+    - Satukan hyphen + spasi menjadi kosong hanya jika diikuti newline/linewrap
+    - Rapikan whitespace
+    """
+    s = hay or ""
+    # gabung pemenggalan baris dengan hyphen lalu spasi/newline
+    s = re.sub(r"-\s*\n\s*", "", s)
+    # rapikan whitespace
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _token_to_regex(token: str) -> re.Pattern:
+    """
+    Konversi token menjadi regex dengan aturan:
+    - Jika token di-quote: frasa adjacent, whole-phrase, case-insensitive
+    - Jika token mengandung '*' (wildcard): ubah '*' -> '\\w*' lalu whole-word
+    - Selain itu: exact whole-word match (case-insensitive)
+    Catatan: kita TIDAK menghapus angka/simbol di sini (supaya 'CO2' tetap 'CO2').
     """
     t = (token or "").strip()
+
+    # Quoted phrase → adjacent, whole-phrase
     if len(t) >= 2 and t[0] == t[-1] == '"':
-        return _phrase_present(hay, t[1:-1], adjacency=True)
-    return _phrase_present(hay, t, adjacency=ADJACENT_PHRASES_DEFAULT)
+        phrase = t[1:-1].strip()
+        # escape semua meta char, lalu izinkan spasi apa adanya
+        pat = r"{wb}{phrase}{wb}".format(
+            wb=WORD_BOUNDARY,
+            phrase=re.escape(phrase)
+        )
+        return re.compile(pat, flags=re.IGNORECASE)
+
+    # Wildcard: ganti '*' menjadi \w* (huruf/angka/underscore), lalu whole-word
+    if "*" in t:
+        # contoh: CO* -> \bCO\w*\b
+        core = re.escape(t).replace(r"\*", r"\w*")
+        pat = r"{wb}{core}{wb}".format(wb=WORD_BOUNDARY, core=core)
+        return re.compile(pat, flags=re.IGNORECASE)
+
+    # Default: exact whole-word (bukan substring di dalam kata lain)
+    # contoh: 'CO2' hanya match token 'CO2', bukan 'company' atau 'CO2x'
+    core = re.escape(t)
+    pat = r"{wb}{core}{wb}".format(wb=WORD_BOUNDARY, core=core)
+    return re.compile(pat, flags=re.IGNORECASE)
+
 
 # ===== Parser Query Boolean Sederhana =====
 TOKEN_RE = re.compile(r'\s*(\(|\)|"[^"]+"|AND|OR|NOT|[^\s()]+)\s*', re.IGNORECASE)
