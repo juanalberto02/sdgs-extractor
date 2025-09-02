@@ -10,3 +10,5 @@ mysql-connector-python
 python-dotenv
 scikit-learn
 scipy
+torch
+sentence-transformers
