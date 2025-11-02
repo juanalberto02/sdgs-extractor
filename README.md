@@ -4,13 +4,13 @@
   An intelligent web-based system that identifies and classifies research publications by their relevance to the United Nations Sustainable Development Goals (SDGs).Built using <b>FastAPI</b>, <b>MySQL</b>, <b>PyMuPDF</b>, and <b>Sentence-BERT</b> for semantic text analysis.
 </p>
 
-<h2> Features </h2>
-1. PDF Extraction — Automatically extracts Title, Abstract, and Keywords using PyMuPDF.
-2. Rule-Based Matching — Detects SDG indicators with curated inclusion/exclusion patterns.
-3. Semantic Similarity — Computes document-to-indicator similarity using Sentence-BERT embeddings.
-4. Top-3 SDG Detection — Displays the top three most relevant SDGs with similarity scores.
-5. Explainable Output — Highlights missing and matched keywords, inclusion scopes, and confidence levels.
-6 Web Interface — FastAPI backend + modern, responsive frontend for seamless user interaction.
+<h2> Features </h2> 
+1. PDF Extraction — Automatically extracts Title, Abstract, and Keywords using PyMuPDF. <br>
+2. Rule-Based Matching — Detects SDG indicators with curated inclusion/exclusion patterns. <br>
+3. Semantic Similarity — Computes document-to-indicator similarity using Sentence-BERT embeddings. <br>
+4. Top-3 SDG Detection — Displays the top three most relevant SDGs with similarity scores. <br>
+5. Explainable Output — Highlights missing and matched keywords, inclusion scopes, and confidence levels. <br>
+6 Web Interface — FastAPI backend + modern, responsive frontend for seamless user interaction. <br>
 
 <h3> Homepage </h3>
 Landing page introducing SDGs and the system overview.
