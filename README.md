@@ -1,3 +1,5 @@
+Web app to detect a paper’s relevant UN SDGs by extracting Title/Abstract/Keywords from PDFs and matching them with curated indicators using NLP and embeddings (FastAPI, PyMuPDF, SBERT, MySQL).
+
 <img width="1584" height="865" alt="image" src="https://github.com/user-attachments/assets/edbab743-6c66-4325-a956-51c7cdda0fe4" />
 
 <img width="1067" height="847" alt="image" src="https://github.com/user-attachments/assets/96fdf778-59a4-4f94-ae11-259e7f74ff47" />
